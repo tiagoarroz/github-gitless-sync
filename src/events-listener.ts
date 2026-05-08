@@ -146,8 +146,14 @@ export default class EventsListener {
     );
   }
 
+  private isDsStoreFile(filePath: string): boolean {
+    return filePath.split("/").pop() === ".DS_Store";
+  }
+
   private async isSyncable(filePath: string) {
-    if (filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`) {
+    if (this.isDsStoreFile(filePath)) {
+      return false;
+    } else if (filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`) {
       // Manifest file must always be synced
       return true;
     } else if (this.isWorkspaceFile(filePath)) {
