@@ -711,6 +711,10 @@ export default class SyncManager {
     return filePath === `${this.vault.configDir}/${LOG_FILE_NAME}`;
   }
 
+  private isDsStoreFile(filePath: string): boolean {
+    return filePath.split("/").pop() === ".DS_Store";
+  }
+
   private isWorkspaceFile(filePath: string): boolean {
     return (
       filePath === `${this.vault.configDir}/workspace.json` ||
@@ -726,6 +730,7 @@ export default class SyncManager {
     // Keep these files out of metadata when they should not be synced.
     return (
       this.isLogFile(filePath) ||
+      this.isDsStoreFile(filePath) ||
       (this.isWorkspaceFile(filePath) && !this.shouldSyncWorkspaceFiles())
     );
   }
