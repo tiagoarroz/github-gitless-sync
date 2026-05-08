@@ -17,6 +17,16 @@ const SplitView = ({
   const [currentFileIndex, setCurrentFileIndex] = React.useState(0);
   const currentFile = files.at(currentFileIndex);
 
+  const resolveAllWithSource = (source: "remote" | "local") => {
+    // Mantém as resoluções já feitas manualmente e resolve os conflitos restantes
+    // com a fonte selecionada no topo da janela.
+    const remainingResolutions = files.map((file) => ({
+      filePath: file.filePath,
+      content: source === "remote" ? file.remoteContent : file.localContent,
+    }));
+    onResolveAllConflicts([...resolvedConflicts, ...remainingResolutions]);
+  };
+
   const onConflictResolved = () => {
     // Remove the file from the conflicts to resolve
     const remainingFiles = files.filter(
@@ -83,6 +93,23 @@ const SplitView = ({
           </div>
         ) : (
           <>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "var(--size-4-2)",
+                padding: "var(--size-4-2) var(--size-4-4)",
+                borderBottom: "1px solid var(--background-modifier-border)",
+                backgroundColor: "var(--background-primary)",
+              }}
+            >
+              <button onClick={() => resolveAllWithSource("remote")}>
+                Keep remote
+              </button>
+              <button onClick={() => resolveAllWithSource("local")}>
+                Keep local
+              </button>
+            </div>
             <FilesTabBar
               files={files.map((f) => f.filePath)}
               currentFile={currentFile?.filePath || ""}
