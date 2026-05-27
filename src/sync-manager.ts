@@ -337,7 +337,11 @@ export default class SyncManager {
       }
 
       const normalizedPath = normalizePath(targetPath);
-      await this.vault.adapter.writeBinary(normalizedPath, data);
+      const fileBuffer = data.buffer.slice(
+        data.byteOffset,
+        data.byteOffset + data.byteLength,
+      ) as ArrayBuffer;
+      await this.vault.adapter.writeBinary(normalizedPath, fileBuffer);
       await this.logger.info("Written file", {
         normalizedPath,
       });
