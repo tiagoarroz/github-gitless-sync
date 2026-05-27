@@ -24,7 +24,14 @@ const SplitView = ({
       filePath: file.filePath,
       content: source === "remote" ? file.remoteContent : file.localContent,
     }));
-    onResolveAllConflicts([...resolvedConflicts, ...remainingResolutions]);
+    const allResolutions = [...resolvedConflicts, ...remainingResolutions];
+
+    // Atualiza o estado da UI antes de retomar o sync para esconder de imediato
+    // os conflitos que já foram resolvidos em bloco.
+    setFiles([]);
+    setCurrentFileIndex(0);
+    setResolvedConflicts(allResolutions);
+    onResolveAllConflicts(allResolutions);
   };
 
   const onConflictResolved = () => {
