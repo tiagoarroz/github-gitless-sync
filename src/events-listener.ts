@@ -64,11 +64,33 @@ export default class EventsListener {
     const filePath = file instanceof TAbstractFile ? file.path : file;
     await this.logger.info("Received delete event", filePath);
     if (file instanceof TFolder) {
-      // Skip folders
+      // Ao apagar uma pasta, marcamos também todos os ficheiros rastreados dentro dela.
+      const folderPrefix = filePath + "/";
+      const deletedAt = Date.now();
+      let changed = false;
+      Object.keys(this.metadataStore.data.files).forEach((trackedPath) => {
+        if (
+          trackedPath.startsWith(folderPrefix) &&
+          !this.metadataStore.data.files[trackedPath].deleted
+        ) {
+          this.metadataStore.data.files[trackedPath].deleted = true;
+          this.metadataStore.data.files[trackedPath].deletedAt = deletedAt;
+          changed = true;
+        }
+      });
+      if (changed) {
+        await this.metadataStore.save();
+        await this.logger.info("Marked files in deleted folder as deleted", filePath);
+      }
       return;
     }
     if (!(await this.isSyncable(filePath))) {
       // The file was not in directory that we're syncing with GitHub
+      return;
+    }
+
+    if (!this.metadataStore.data.files[filePath]) {
+      // Ficheiro não rastreado, não há estado para atualizar.
       return;
     }
 

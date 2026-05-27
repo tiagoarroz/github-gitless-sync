@@ -278,84 +278,78 @@ export default class SyncManager {
       length: entries.length,
     });
 
-    await Promise.all(
-      entries.map(async (entry: Entry) => {
-        const targetPath = this.getZipEntryTargetPath(entry);
+    // Processamos sequencialmente para reduzir picos de memória em vaults grandes.
+    for (const entry of entries) {
+      const targetPath = this.getZipEntryTargetPath(entry);
 
-        if (targetPath === "") {
-          // Must be the root folder, skip it.
-          // This is really important as that would lead us to try and
-          // create the folder "/" and crash Obsidian
-          return;
-        }
+      if (targetPath === "") {
+        // É a raiz artificial do ZIP, ignoramos.
+        continue;
+      }
 
-        if (isGitignored(gitignoreMatcher, targetPath, entry.directory)) {
-          await this.logger.info("Skipping .gitignore match", targetPath);
-          return;
-        }
+      if (isGitignored(gitignoreMatcher, targetPath, entry.directory)) {
+        await this.logger.info("Skipping .gitignore match", targetPath);
+        continue;
+      }
 
-        if (
-          this.settings.syncConfigDir &&
-          targetPath.startsWith(this.vault.configDir) &&
-          targetPath !== `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
-        ) {
-          await this.logger.info("Skipped config", { targetPath });
-          return;
-        }
+      if (
+        !this.settings.syncConfigDir &&
+        targetPath.startsWith(this.vault.configDir) &&
+        targetPath !== `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
+      ) {
+        await this.logger.info("Skipped config", { targetPath });
+        continue;
+      }
 
-        if (entry.directory) {
-          const normalizedPath = normalizePath(targetPath);
-          await this.vault.adapter.mkdir(normalizedPath);
-          await this.logger.info("Created directory", {
-            normalizedPath,
-          });
-          return;
-        }
-
-        if (this.isVolatileSyncArtifact(targetPath)) {
-          await this.logger.info("Skipping volatile sync artifact", targetPath);
-          return;
-        }
-
-        // .gitignore is also a hidden file, but it must be downloaded to keep
-        // the same rules across vaults.
-        if (
-          targetPath !== GITIGNORE_FILE_NAME &&
-          targetPath.split("/").last()?.startsWith(".")
-        ) {
-          // We must skip hidden files as that creates issues with syncing.
-          // This is fine as users can't edit hidden files in Obsidian anyway.
-          await this.logger.info("Skipping hidden file", targetPath);
-          return;
-        }
-
-        const writer = new Uint8ArrayWriter();
-        await entry.getData!(writer);
-        const data = await writer.getData();
-        const dir = targetPath.split("/").splice(0, -1).join("/");
-        if (dir !== "") {
-          const normalizedDir = normalizePath(dir);
-          await this.vault.adapter.mkdir(normalizedDir);
-          await this.logger.info("Created directory", {
-            normalizedDir,
-          });
-        }
-
+      if (entry.directory) {
         const normalizedPath = normalizePath(targetPath);
-        await this.vault.adapter.writeBinary(normalizedPath, data);
-        await this.logger.info("Written file", {
+        await this.vault.adapter.mkdir(normalizedPath);
+        await this.logger.info("Created directory", {
           normalizedPath,
         });
-        this.metadataStore.data.files[normalizedPath] = {
-          path: normalizedPath,
-          sha: files[normalizedPath].sha,
-          dirty: false,
-          justDownloaded: true,
-          lastModified: Date.now(),
-        };
-        await this.metadataStore.save();
-      }),
-    );
+        continue;
+      }
+
+      if (this.isVolatileSyncArtifact(targetPath)) {
+        await this.logger.info("Skipping volatile sync artifact", targetPath);
+        continue;
+      }
+
+      // .gitignore também é escondido, mas deve ser transferido.
+      if (
+        targetPath !== GITIGNORE_FILE_NAME &&
+        targetPath.split("/").last()?.startsWith(".")
+      ) {
+        await this.logger.info("Skipping hidden file", targetPath);
+        continue;
+      }
+
+      const writer = new Uint8ArrayWriter();
+      await entry.getData!(writer);
+      const data = await writer.getData();
+      const dir = targetPath.split("/").splice(0, -1).join("/");
+      if (dir !== "") {
+        const normalizedDir = normalizePath(dir);
+        await this.vault.adapter.mkdir(normalizedDir);
+        await this.logger.info("Created directory", {
+          normalizedDir,
+        });
+      }
+
+      const normalizedPath = normalizePath(targetPath);
+      await this.vault.adapter.writeBinary(normalizedPath, data);
+      await this.logger.info("Written file", {
+        normalizedPath,
+      });
+      this.metadataStore.data.files[normalizedPath] = {
+        path: normalizedPath,
+        sha: files[normalizedPath].sha,
+        dirty: false,
+        justDownloaded: true,
+        lastModified: Date.now(),
+      };
+      await this.metadataStore.save();
+    }
 
     await this.logger.info("Extracted zip");
 
@@ -493,8 +487,12 @@ export default class SyncManager {
     try {
       await this.syncImpl();
       // Shown only if sync doesn't fail
+      await this.logger.info("Sync successful");
       new Notice("Sync successful", 5000);
     } catch (err) {
+      await this.logger.error("Error syncing", {
+        error: err instanceof Error ? err.message : String(err),
+      });
       // Show the error to the user, it's not automatically dismissed to make sure
       // the user sees it.
       new Notice(`Error syncing. ${err}`);
@@ -652,6 +650,24 @@ export default class SyncManager {
         switch (action.type) {
           case "upload": {
             const normalizedPath = normalizePath(action.filePath);
+            if (!(await this.vault.adapter.exists(normalizedPath))) {
+              // O ficheiro já não existe localmente sem ter sido registado como delete
+              // (ex.: pasta de plugin apagada via UI do Obsidian). Tratamos como
+              // delete remoto para remover do GitHub no próximo sync.
+              await this.logger.warn(
+                "Upload action skipped: file no longer exists, treating as delete_remote",
+                action.filePath,
+              );
+              if (this.metadataStore.data.files[action.filePath]) {
+                this.metadataStore.data.files[action.filePath].deleted = true;
+                this.metadataStore.data.files[action.filePath].deletedAt =
+                  Date.now();
+              }
+              if (newTreeFiles[action.filePath]) {
+                newTreeFiles[action.filePath].sha = null;
+              }
+              break;
+            }
             const resolution = conflictResolutions.find(
               (c: ConflictResolution) => c.filePath === action.filePath,
             );
@@ -669,10 +685,11 @@ export default class SyncManager {
             };
             break;
           }
-          case "delete_remote": {
-            newTreeFiles[action.filePath].sha = null;
+          case "delete_remote":
+            if (newTreeFiles[action.filePath]) {
+              newTreeFiles[action.filePath].sha = null;
+            }
             break;
-          }
           case "download":
             break;
           case "delete_local":
@@ -874,6 +891,7 @@ export default class SyncManager {
   /**
    * Finds conflicts between local and remote files.
    * @param filesMetadata Remote files metadata
+   * @param remoteRepoFiles Current remote repository tree
    * @returns List of object containing file path, remote and local content of conflicting files
    */
   async findConflicts(filesMetadata: {
@@ -935,9 +953,12 @@ export default class SyncManager {
           if (remoteContent === null) {
             return null;
           }
-          const localContent = await this.vault.adapter.read(
-            normalizePath(filePath),
-          );
+          let localContent = "";
+          if (await this.vault.adapter.exists(normalizePath(filePath))) {
+            localContent = await this.vault.adapter.read(
+              normalizePath(filePath),
+            );
+          }
           return {
             filePath,
             remoteContent,
@@ -987,13 +1008,6 @@ export default class SyncManager {
         }
 
         const localSHA = await this.calculateSHA(filePath);
-        if (remoteFile.sha === localSHA) {
-          // If the remote file sha is identical to the actual sha of the local file
-          // there are no actions to take.
-          // We calculate the SHA at the moment instead of using the one stored in the
-          // metadata file cause we update that only when the file is uploaded or downloaded.
-          return;
-        }
 
         if (remoteFile.deleted && !localFile.deleted) {
           if ((remoteFile.deletedAt as number) > localFile.lastModified) {
@@ -1024,13 +1038,19 @@ export default class SyncManager {
             return;
           }
         }
+        if (remoteFile.sha === localSHA) {
+          // Se o SHA remoto e o SHA local atual forem iguais, não há ações.
+          return;
+        }
 
-        // For non-deletion cases, if SHAs differ, we just need to check if local changed.
-        // Conflicts are already filtered out so we can make this decision easily
+        // Fora de cenários de delete, o SHA é a fonte principal de verdade.
+        // Os conflitos já foram filtrados acima, por isso podemos decidir direção.
         if (localSHA !== localFile.sha) {
+          // O ficheiro local mudou desde o último sync, deve ser enviado.
           actions.push({ type: "upload", filePath: filePath });
           return;
         } else {
+          // O local não mudou e o SHA remoto difere, descarregamos o remoto.
           actions.push({ type: "download", filePath: filePath });
           return;
         }
@@ -1159,7 +1179,18 @@ export default class SyncManager {
           // on them if it makes the plugin handle upload better on certain devices.
           if (hasTextExtension(filePath)) {
             const sha = await this.calculateSHA(filePath);
-            this.metadataStore.data.files[filePath].sha = sha;
+            if (this.metadataStore.data.files[filePath]) {
+              this.metadataStore.data.files[filePath].sha = sha;
+            } else {
+              this.metadataStore.data.files[filePath] = {
+                path: filePath,
+                sha: sha,
+                dirty: false,
+                justDownloaded: false,
+                lastModified: syncTime,
+                deleted: false,
+              };
+            }
             return;
           }
 
@@ -1176,7 +1207,19 @@ export default class SyncManager {
           treeFiles[filePath].sha = sha;
           // Can't have both sha and content set, so we delete it
           delete treeFiles[filePath].content;
-          this.metadataStore.data.files[filePath].sha = sha;
+
+          if (this.metadataStore.data.files[filePath]) {
+            this.metadataStore.data.files[filePath].sha = sha;
+          } else {
+            this.metadataStore.data.files[filePath] = {
+              path: filePath,
+              sha: sha,
+              dirty: false,
+              justDownloaded: false,
+              lastModified: syncTime,
+              deleted: false,
+            };
+          }
         }),
     );
 
@@ -1294,6 +1337,9 @@ export default class SyncManager {
           isGitignored(gitignoreMatcher, filePath) ||
           this.isVolatileSyncArtifact(filePath)
         ) {
+          return;
+        }
+        if (this.isVolatileSyncArtifact(filePath)) {
           return;
         }
 
